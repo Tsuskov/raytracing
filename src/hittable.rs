@@ -1,10 +1,14 @@
+use crate::material::Material;
 use crate::ray::Ray;
 use crate::vec3::Vec3;
 
 // What we learn when a ray strikes a surface.
 pub struct HitRecord {
-    pub normal: Vec3, // outward surface direction at the hit (unit length)
-    pub t: f32,       // distance along the ray to the hit
+    pub point: Vec3,       // where the hit happened, in world space
+    pub normal: Vec3,      // surface direction, always facing against the ray
+    pub front_face: bool,  // did we hit the outside (true) or inside (false)?
+    pub t: f32,            // distance along the ray to the hit
+    pub material: Material, // what the surface is made of
 }
 
 // Anything a ray can intersect. A sphere, a plane, a triangle... each just
@@ -18,6 +22,7 @@ pub trait Hittable {
 pub struct Sphere {
     pub center: Vec3,
     pub radius: f32,
+    pub material: Material,
 }
 
 impl Hittable for Sphere {
@@ -45,10 +50,29 @@ impl Hittable for Sphere {
             }
         }
 
+        let point = r.at(t);
         // Dividing by the radius normalizes without a sqrt: for a sphere the
         // vector from center to surface already has length == radius.
-        let normal = (r.at(t) - self.center) / self.radius;
-        Some(HitRecord { normal, t })
+        let outward_normal = (point - self.center) / self.radius;
+
+        // Decide which side we hit. If the ray and the outward normal point
+        // the same way (dot > 0), we struck the inside (e.g. a ray exiting
+        // glass). We always store the normal facing *against* the ray, and
+        // remember the side in `front_face` -- glass needs to know.
+        let front_face = r.direction.dot(outward_normal) < 0.0;
+        let normal = if front_face {
+            outward_normal
+        } else {
+            -outward_normal
+        };
+
+        Some(HitRecord {
+            point,
+            normal,
+            front_face,
+            t,
+            material: self.material,
+        })
     }
 }
 
