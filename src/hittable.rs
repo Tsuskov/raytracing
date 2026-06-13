@@ -1,6 +1,7 @@
+use crate::aabb::Aabb;
 use crate::material::Material;
 use crate::ray::Ray;
-use crate::vec3::Vec3;
+use crate::vec3::{vec3, Vec3};
 
 // What we learn when a ray strikes a surface.
 pub struct HitRecord {
@@ -20,6 +21,9 @@ pub struct HitRecord {
 // rayon can render many pixels in parallel against the same world.
 pub trait Hittable: Sync {
     fn hit(&self, r: Ray, t_min: f32, t_max: f32) -> Option<HitRecord>;
+    // The axis-aligned box enclosing this object. The BVH needs it to build
+    // and traverse its tree of bounding boxes.
+    fn bounding_box(&self) -> Aabb;
 }
 
 pub struct Sphere {
@@ -77,21 +81,12 @@ impl Hittable for Sphere {
             material: self.material,
         })
     }
-}
 
-// A list of objects is itself hittable: to hit the list, hit every object and
-// keep the closest. We shrink the search range to the closest hit so far
-// (`closest`), so each object is automatically occluded by nearer ones.
-impl Hittable for Vec<Box<dyn Hittable>> {
-    fn hit(&self, r: Ray, t_min: f32, t_max: f32) -> Option<HitRecord> {
-        let mut closest = t_max;
-        let mut result = None;
-        for object in self {
-            if let Some(rec) = object.hit(r, t_min, closest) {
-                closest = rec.t;
-                result = Some(rec);
-            }
+    fn bounding_box(&self) -> Aabb {
+        let r = vec3(self.radius, self.radius, self.radius);
+        Aabb {
+            min: self.center - r,
+            max: self.center + r,
         }
-        result
     }
 }

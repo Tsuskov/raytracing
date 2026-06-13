@@ -1,9 +1,12 @@
+mod aabb;
+mod bvh;
 mod camera;
 mod hittable;
 mod material;
 mod ray;
 mod vec3;
 
+use bvh::BvhNode;
 use camera::{Camera, Viewport};
 use hittable::{Hittable, Sphere};
 use material::Material;
@@ -383,7 +386,9 @@ fn render_snapshot(world: &dyn Hittable, width: usize, height: usize, samples: u
 }
 
 fn main() {
-    let world = build_world();
+    // Organize the scene into a BVH so each ray tests ~log(N) objects instead
+    // of all of them -- the difference between a few FPS and smooth real-time.
+    let world = BvhNode::build(build_world());
 
     // `cargo run --release -- render [width] [samples]` renders a PNG and
     // exits; with no args we open the interactive window.
@@ -395,8 +400,8 @@ fn main() {
             .and_then(|s| s.parse().ok())
             .unwrap_or(SNAPSHOT_SAMPLES);
         let height = width * 9 / 16; // keep 16:9
-        render_snapshot(&world, width, height, samples);
+        render_snapshot(world.as_ref(), width, height, samples);
     } else {
-        run_interactive(&world);
+        run_interactive(world.as_ref());
     }
 }
