@@ -1,5 +1,5 @@
 use crate::ray::Ray;
-use crate::vec3::{vec3, Vec3};
+use crate::vec3::{Vec3, vec3};
 
 // An axis-aligned bounding box: the smallest box (aligned to the x/y/z axes)
 // that fully contains an object. Testing a ray against a box is far cheaper

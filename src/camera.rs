@@ -1,5 +1,5 @@
 use crate::ray::Ray;
-use crate::vec3::{vec3, Vec3};
+use crate::vec3::{Vec3, vec3};
 
 // A movable camera. We store where it is and where it looks (as two angles),
 // and derive the direction vectors from those on demand.

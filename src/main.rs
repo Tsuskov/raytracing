@@ -11,10 +11,10 @@ use camera::{Camera, Viewport};
 use hittable::{Hittable, Sphere};
 use material::Material;
 use minifb::{Key, Window, WindowOptions};
-use rayon::prelude::*;
 use ray::Ray;
+use rayon::prelude::*;
 use std::time::Instant;
-use vec3::{reflect, refract, vec3, Color, Vec3};
+use vec3::{Color, Vec3, reflect, refract, vec3};
 
 // The interactive window size.
 const WIDTH: usize = 800;
@@ -266,7 +266,7 @@ fn render_into(
             let mut rng =
                 ((y as u32).wrapping_mul(0x9E3779B9) ^ frame_seed.wrapping_mul(2654435761)) | 1;
 
-            for x in 0..width {
+            for (x, pixel) in row.iter_mut().enumerate() {
                 // Average several jittered rays per pixel (anti-aliasing).
                 let mut color = vec3(0.0, 0.0, 0.0);
                 for _ in 0..samples {
@@ -275,7 +275,7 @@ fn render_into(
                     let r = vp.ray(s, t);
                     color = color + ray_color(r, world, MAX_DEPTH, &mut rng);
                 }
-                row[x] = to_u32(color / samples as f32);
+                *pixel = to_u32(color / samples as f32);
             }
         });
 }
@@ -350,7 +350,15 @@ fn run_interactive(world: &dyn Hittable) {
         cam.pitch = cam.pitch.clamp(-1.5, 1.5);
 
         let vp = cam.viewport(WIDTH, HEIGHT);
-        render_into(&mut buffer, WIDTH, HEIGHT, SAMPLES_PER_PIXEL, &vp, world, frame);
+        render_into(
+            &mut buffer,
+            WIDTH,
+            HEIGHT,
+            SAMPLES_PER_PIXEL,
+            &vp,
+            world,
+            frame,
+        );
 
         window
             .update_with_buffer(&buffer, WIDTH, HEIGHT)
@@ -394,7 +402,10 @@ fn main() {
     // exits; with no args we open the interactive window.
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(|s| s == "render").unwrap_or(false) {
-        let width = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(SNAPSHOT_WIDTH);
+        let width = args
+            .get(2)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(SNAPSHOT_WIDTH);
         let samples = args
             .get(3)
             .and_then(|s| s.parse().ok())

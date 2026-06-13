@@ -1,14 +1,14 @@
 use crate::aabb::Aabb;
 use crate::material::Material;
 use crate::ray::Ray;
-use crate::vec3::{vec3, Vec3};
+use crate::vec3::{Vec3, vec3};
 
 // What we learn when a ray strikes a surface.
 pub struct HitRecord {
-    pub point: Vec3,       // where the hit happened, in world space
-    pub normal: Vec3,      // surface direction, always facing against the ray
-    pub front_face: bool,  // did we hit the outside (true) or inside (false)?
-    pub t: f32,            // distance along the ray to the hit
+    pub point: Vec3,        // where the hit happened, in world space
+    pub normal: Vec3,       // surface direction, always facing against the ray
+    pub front_face: bool,   // did we hit the outside (true) or inside (false)?
+    pub t: f32,             // distance along the ray to the hit
     pub material: Material, // what the surface is made of
 }
 
