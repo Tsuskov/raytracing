@@ -27,7 +27,6 @@ cargo run --release -- render 3840 256   # ultra-glatt
 
 ## Wie es funktioniert
 
-Eine ausführliche Erklärung jedes Bausteins — **zweistufig**: anschaulich *und* mit der Mathematik dahinter — steht in **[OVERVIEW.md](OVERVIEW.md)**.
 
 Die Kurzfassung:
 
