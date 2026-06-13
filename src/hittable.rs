@@ -15,7 +15,10 @@ pub struct HitRecord {
 // answers one question: "does this ray hit me between t_min and t_max, and if
 // so, where?" `ray_color` only ever talks to this trait, never to concrete
 // shapes, so adding new shapes never touches the renderer.
-pub trait Hittable {
+//
+// The `: Sync` bound means objects can be shared across threads -- required so
+// rayon can render many pixels in parallel against the same world.
+pub trait Hittable: Sync {
     fn hit(&self, r: Ray, t_min: f32, t_max: f32) -> Option<HitRecord>;
 }
 

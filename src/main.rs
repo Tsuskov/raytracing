@@ -4,21 +4,27 @@ mod material;
 mod ray;
 mod vec3;
 
-use camera::Camera;
+use camera::{Camera, Viewport};
 use hittable::{Hittable, Sphere};
 use material::Material;
 use minifb::{Key, Window, WindowOptions};
+use rayon::prelude::*;
 use ray::Ray;
 use std::time::Instant;
 use vec3::{reflect, refract, vec3, Color, Vec3};
 
-// The size of our image / window, in pixels.
+// The interactive window size.
 const WIDTH: usize = 800;
 const HEIGHT: usize = 450;
 
 // How many rays we average per pixel for anti-aliasing. More = smoother edges
-// but slower. 4 keeps us comfortably real-time.
+// but slower. 4 keeps the (heavy) many-sphere scene real-time.
 const SAMPLES_PER_PIXEL: usize = 4;
+
+// Defaults for the offline 4K snapshot (cargo run --release -- render). Many
+// samples = smooth, photographic result; we're not on a frame budget here.
+const SNAPSHOT_WIDTH: usize = 3840;
+const SNAPSHOT_SAMPLES: usize = 64;
 
 // How many times a ray may bounce (metal/glass) before we give up. Without
 // this cap, a ray trapped between mirrors would recurse forever.
@@ -103,8 +109,10 @@ fn ray_color(r: Ray, world: &dyn Hittable, depth: u32, rng: &mut u32) -> Color {
                 }
             }
 
-            // Glass: either refract through or reflect off the surface. Schlick
-            // picks which, and total internal reflection forces reflection.
+            // Glass: a real surface both reflects and refracts at once. We
+            // trace BOTH rays and blend them by the Fresnel factor (Schlick).
+            // Doing it deterministically -- instead of randomly picking one --
+            // is what keeps the glass noise-free.
             Material::Dielectric { ior } => {
                 // Entering the glass divides by ior; exiting multiplies by it.
                 let ratio = if rec.front_face { 1.0 / ior } else { ior };
@@ -113,20 +121,25 @@ fn ray_color(r: Ray, world: &dyn Hittable, depth: u32, rng: &mut u32) -> Color {
                 let cos_theta = (-unit_dir).dot(rec.normal).min(1.0);
                 let sin_theta = (1.0 - cos_theta * cos_theta).sqrt();
 
-                // If the bent ray would need to exceed 90deg, it physically
-                // can't refract -- it must reflect (total internal reflection).
-                let cannot_refract = ratio * sin_theta > 1.0;
-                let direction = if cannot_refract
-                    || reflectance(cos_theta, ratio) > random_f32(rng)
-                {
-                    reflect(unit_dir, rec.normal)
-                } else {
-                    refract(unit_dir, rec.normal, ratio)
-                };
+                let reflected = reflect(unit_dir, rec.normal);
+                let reflected_color =
+                    ray_color(Ray::new(rec.point, reflected), world, depth - 1, rng);
 
-                // Clear glass doesn't tint, so we don't multiply by a color.
-                let scattered = Ray::new(rec.point, direction);
-                ray_color(scattered, world, depth - 1, rng)
+                // If the bent ray would need to exceed 90deg it physically
+                // can't refract -- all the light reflects (total internal
+                // reflection), so there's nothing to blend.
+                if ratio * sin_theta > 1.0 {
+                    return reflected_color;
+                }
+
+                // Otherwise mix reflection and refraction. Schlick gives how
+                // much reflects; the rest refracts through.
+                let refracted = refract(unit_dir, rec.normal, ratio);
+                let refracted_color =
+                    ray_color(Ray::new(rec.point, refracted), world, depth - 1, rng);
+
+                let r = reflectance(cos_theta, ratio);
+                reflected_color * r + refracted_color * (1.0 - r)
             }
         }
     } else {
@@ -146,76 +159,155 @@ fn to_u32(c: Color) -> u32 {
     (r << 16) | (g << 8) | b
 }
 
-fn main() {
-    let mut buffer: Vec<u32> = vec![0; WIDTH * HEIGHT];
+// Build the "Ray Tracing in One Weekend" showcase: a big ground sphere, three
+// large feature spheres (glass, matte, metal), and a field of small spheres
+// with randomized materials. Deterministic: same seed -> same scene.
+fn build_world() -> Vec<Box<dyn Hittable>> {
+    let mut rng: u32 = 1;
+    let mut world: Vec<Box<dyn Hittable>> = Vec::new();
 
-    // --- The world -------------------------------------------------------
-    // The classic showcase: a matte sphere flanked by glass (left) and metal
-    // (right), all resting on a big matte ground sphere.
-    let world: Vec<Box<dyn Hittable>> = vec![
-        // Ground
-        Box::new(Sphere {
-            center: vec3(0.0, -100.5, -1.0),
-            radius: 100.0,
-            material: Material::Lambertian {
-                albedo: vec3(0.8, 0.8, 0.0),
-            },
-        }),
-        // Center: matte
-        Box::new(Sphere {
-            center: vec3(0.0, 0.0, -1.0),
-            radius: 0.5,
-            material: Material::Lambertian {
-                albedo: vec3(0.7, 0.3, 0.3),
-            },
-        }),
-        // Left: glass
-        Box::new(Sphere {
-            center: vec3(-1.0, 0.0, -1.0),
-            radius: 0.5,
-            material: Material::Dielectric { ior: 1.5 },
-        }),
-        // Right: metal
-        Box::new(Sphere {
-            center: vec3(1.0, 0.0, -1.0),
-            radius: 0.5,
-            material: Material::Metal {
-                albedo: vec3(0.8, 0.6, 0.2),
-                fuzz: 0.1,
-            },
-        }),
-    ];
+    // Ground (a giant sphere, looks flat up close).
+    world.push(Box::new(Sphere {
+        center: vec3(0.0, -1000.0, 0.0),
+        radius: 1000.0,
+        material: Material::Lambertian {
+            albedo: vec3(0.5, 0.5, 0.5),
+        },
+    }));
 
-    // The camera starts at the origin looking down -z (same view as before),
-    // but now we can move it around.
+    // A grid of small spheres, each nudged randomly and given a random material.
+    for a in -11..11 {
+        for b in -11..11 {
+            let choose = random_f32(&mut rng);
+            let center = vec3(
+                a as f32 + 0.9 * random_f32(&mut rng),
+                0.2,
+                b as f32 + 0.9 * random_f32(&mut rng),
+            );
+            // Leave a gap where the big metal sphere stands.
+            if (center - vec3(4.0, 0.2, 0.0)).length() <= 0.9 {
+                continue;
+            }
+
+            let material = if choose < 0.8 {
+                // 80% diffuse, with a random (slightly dark) color.
+                let albedo = vec3(
+                    random_f32(&mut rng) * random_f32(&mut rng),
+                    random_f32(&mut rng) * random_f32(&mut rng),
+                    random_f32(&mut rng) * random_f32(&mut rng),
+                );
+                Material::Lambertian { albedo }
+            } else if choose < 0.95 {
+                // 15% metal, light color and a little fuzz.
+                let albedo = vec3(
+                    0.5 + 0.5 * random_f32(&mut rng),
+                    0.5 + 0.5 * random_f32(&mut rng),
+                    0.5 + 0.5 * random_f32(&mut rng),
+                );
+                let fuzz = 0.5 * random_f32(&mut rng);
+                Material::Metal { albedo, fuzz }
+            } else {
+                // 5% glass.
+                Material::Dielectric { ior: 1.5 }
+            };
+
+            world.push(Box::new(Sphere {
+                center,
+                radius: 0.2,
+                material,
+            }));
+        }
+    }
+
+    // Three big feature spheres.
+    world.push(Box::new(Sphere {
+        center: vec3(0.0, 1.0, 0.0),
+        radius: 1.0,
+        material: Material::Dielectric { ior: 1.5 },
+    }));
+    world.push(Box::new(Sphere {
+        center: vec3(-4.0, 1.0, 0.0),
+        radius: 1.0,
+        material: Material::Lambertian {
+            albedo: vec3(0.4, 0.2, 0.1),
+        },
+    }));
+    world.push(Box::new(Sphere {
+        center: vec3(4.0, 1.0, 0.0),
+        radius: 1.0,
+        material: Material::Metal {
+            albedo: vec3(0.7, 0.6, 0.5),
+            fuzz: 0.0,
+        },
+    }));
+
+    world
+}
+
+// Render the whole image into `buffer` using all CPU cores. rayon splits the
+// rows across threads; each row gets its own RNG so threads never share state.
+fn render_into(
+    buffer: &mut [u32],
+    width: usize,
+    height: usize,
+    samples: usize,
+    vp: &Viewport,
+    world: &dyn Hittable,
+    frame_seed: u32,
+) {
+    buffer
+        .par_chunks_mut(width)
+        .enumerate()
+        .for_each(|(y, row)| {
+            // Per-row seed, kept nonzero (xorshift requires it).
+            let mut rng =
+                ((y as u32).wrapping_mul(0x9E3779B9) ^ frame_seed.wrapping_mul(2654435761)) | 1;
+
+            for x in 0..width {
+                // Average several jittered rays per pixel (anti-aliasing).
+                let mut color = vec3(0.0, 0.0, 0.0);
+                for _ in 0..samples {
+                    let s = (x as f32 + random_f32(&mut rng)) / (width - 1) as f32;
+                    let t = (y as f32 + random_f32(&mut rng)) / (height - 1) as f32;
+                    let r = vp.ray(s, t);
+                    color = color + ray_color(r, world, MAX_DEPTH, &mut rng);
+                }
+                row[x] = to_u32(color / samples as f32);
+            }
+        });
+}
+
+// A camera positioned to frame the whole scene, looking at the origin.
+fn showcase_camera() -> Camera {
     let mut cam = Camera {
-        position: vec3(0.0, 0.0, 0.0),
+        position: vec3(13.0, 2.0, 3.0),
         yaw: 0.0,
         pitch: 0.0,
+        vfov: 28.0,
     };
+    cam.look_at(vec3(0.0, 0.0, 0.0));
+    cam
+}
 
-    let focal_length = 1.0; // distance from camera to the viewport
-    let viewport_height = 2.0;
-    let viewport_width = viewport_height * (WIDTH as f32 / HEIGHT as f32);
+// Interactive mode: open a window and let the user fly around in real time.
+fn run_interactive(world: &dyn Hittable) {
+    let mut buffer = vec![0u32; WIDTH * HEIGHT];
+    let mut cam = showcase_camera();
 
     let mut window = Window::new("Ray Tracer", WIDTH, HEIGHT, WindowOptions::default())
         .expect("failed to open window");
     window.set_target_fps(60);
 
-    // Track real elapsed time per frame so movement speed is independent of
-    // frame rate (move N units *per second*, not per frame).
     let mut last_frame = Instant::now();
-
-    // Random state for anti-aliasing jitter. Any nonzero seed works (xorshift
-    // must never be zero); it keeps evolving across frames.
-    let mut rng: u32 = 0x9E3779B9;
+    let mut frame: u32 = 0;
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
         let dt = last_frame.elapsed().as_secs_f32();
         last_frame = Instant::now();
+        frame = frame.wrapping_add(1);
 
         // --- Input: update the camera ------------------------------------
-        let move_speed = 2.0 * dt; // world units per second
+        let move_speed = 4.0 * dt; // world units per second
         let look_speed = 1.5 * dt; // radians per second
         let forward = cam.forward();
         let right = cam.right();
@@ -254,41 +346,57 @@ fn main() {
         // Stop just short of straight up/down so the view never flips over.
         cam.pitch = cam.pitch.clamp(-1.5, 1.5);
 
-        // --- Per-frame viewport, rebuilt from the camera's orientation ----
-        // Same idea as the fixed viewport before, but the across/down vectors
-        // now follow wherever the camera looks.
-        let forward = cam.forward();
-        let right = cam.right();
-        let up = right.cross(forward); // camera's own up (already unit length)
-
-        let viewport_u = right * viewport_width;
-        let viewport_v = -up * viewport_height; // down the screen
-        let viewport_center = cam.position + forward * focal_length;
-        let viewport_top_left = viewport_center - viewport_u / 2.0 - viewport_v / 2.0;
-
-        for y in 0..HEIGHT {
-            for x in 0..WIDTH {
-                // Average several rays per pixel, each aimed at a slightly
-                // random spot *within* the pixel. Edges that would be a hard
-                // jagged step become a smooth blend of foreground and
-                // background -- that's anti-aliasing.
-                let mut color = vec3(0.0, 0.0, 0.0);
-                for _ in 0..SAMPLES_PER_PIXEL {
-                    let s = (x as f32 + random_f32(&mut rng)) / (WIDTH - 1) as f32;
-                    let t = (y as f32 + random_f32(&mut rng)) / (HEIGHT - 1) as f32;
-
-                    let pixel = viewport_top_left + s * viewport_u + t * viewport_v;
-                    let r = Ray::new(cam.position, pixel - cam.position);
-                    color = color + ray_color(r, &world, MAX_DEPTH, &mut rng);
-                }
-                color = color / SAMPLES_PER_PIXEL as f32;
-
-                buffer[y * WIDTH + x] = to_u32(color);
-            }
-        }
+        let vp = cam.viewport(WIDTH, HEIGHT);
+        render_into(&mut buffer, WIDTH, HEIGHT, SAMPLES_PER_PIXEL, &vp, world, frame);
 
         window
             .update_with_buffer(&buffer, WIDTH, HEIGHT)
             .expect("failed to update window");
+    }
+}
+
+// Offline mode: render one high-resolution, high-sample frame and save a PNG.
+fn render_snapshot(world: &dyn Hittable, width: usize, height: usize, samples: usize) {
+    let cam = showcase_camera();
+    let vp = cam.viewport(width, height);
+    let mut buffer = vec![0u32; width * height];
+
+    println!("Rendering {width}x{height} at {samples} samples/pixel...");
+    let start = Instant::now();
+    render_into(&mut buffer, width, height, samples, &vp, world, 1);
+    println!("Rendered in {:.1?}", start.elapsed());
+
+    // Pack the u32 buffer into an RGB PNG.
+    let mut img = image::RgbImage::new(width as u32, height as u32);
+    for (i, px) in buffer.iter().enumerate() {
+        let x = (i % width) as u32;
+        let y = (i / width) as u32;
+        let rgb = image::Rgb([
+            ((px >> 16) & 0xff) as u8,
+            ((px >> 8) & 0xff) as u8,
+            (px & 0xff) as u8,
+        ]);
+        img.put_pixel(x, y, rgb);
+    }
+    img.save("render.png").expect("failed to save PNG");
+    println!("Saved render.png");
+}
+
+fn main() {
+    let world = build_world();
+
+    // `cargo run --release -- render [width] [samples]` renders a PNG and
+    // exits; with no args we open the interactive window.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(|s| s == "render").unwrap_or(false) {
+        let width = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(SNAPSHOT_WIDTH);
+        let samples = args
+            .get(3)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(SNAPSHOT_SAMPLES);
+        let height = width * 9 / 16; // keep 16:9
+        render_snapshot(&world, width, height, samples);
+    } else {
+        run_interactive(&world);
     }
 }
